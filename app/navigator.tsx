@@ -144,7 +144,7 @@ export default function HomeScreen() {
 
           <TouchableOpacity
             style={styles.menuItem}
-            onPress={() => router.push('/orders/index')}
+            onPress={() => router.push('/Orders/order')}
           >
             <View style={[styles.iconContainer, { backgroundColor: '#3498db' }]}>
               <Ionicons name="cube-outline" size={32} color="white" />
