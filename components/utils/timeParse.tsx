@@ -2,7 +2,7 @@ import { format } from 'date-fns';
 import { vi } from 'date-fns/locale';
 
 // Hàm xử lý định dạng ngày tháng từ Firestore Timestamp
-export default function formatDate(timestamp){
+export default function formatDate(timestamp ){
     if (!timestamp) return 'Không xác định';
 
     try {

@@ -32,13 +32,29 @@ interface Order {
     createdAt: Date;
     updatedAt: Date;
     shippingAddress: string;
-    phoneNumber: string;
+}
+
+interface ShipperOrder {
+    recipientName: string;
+    recipientPhone: string;
+    deliveryAddress: string;
+    itemsSummary: {
+        productName: string;
+        quantity: number;
+    }[];
+    totalAmount: number;
+    shipmentStatus: 'ready_to_ship' | 'assigned' | 'out_for_delivery' | 'delivered' | 'failed';
+    createdAt: Date;
+    customerId?: string;
 }
 
 type TabType = 'pending' | 'approved' | 'cancelled';
 
+const MAX_QUANTITY = 100;
+const MAX_TOTAL_AMOUNT = 100000000;
+
 export default function Orders() {
-    const { getDocuments, updateDocument } = useFirestore();
+    const { addDocument, getDocuments, updateDocument } = useFirestore();
     const [orders, setOrders] = useState<Order[]>([]);
     const [filteredOrders, setFilteredOrders] = useState<Order[]>([]);
     const [loading, setLoading] = useState(true);
@@ -67,92 +83,51 @@ export default function Orders() {
         filterOrders(searchQuery, activeTab);
     }, [searchQuery, activeTab, orders]);
 
-    const loadData = async (vendorId: string) => {
+    const shouldAutoApprove = (order: Order) => {
+        const totalQuantity = order.items.reduce((sum, item) => sum + item.quantity, 0);
+        return totalQuantity <= MAX_QUANTITY && order.totalAmount <= MAX_TOTAL_AMOUNT;
+    };
+
+    const handleShipperOrder = async (order: Order) => {
+
+        const shipperOrderData: ShipperOrder = {
+            recipientName: order.customerName,
+            recipientPhone: order.customerPhone,
+            deliveryAddress: order.shippingAddress,
+            itemsSummary: order.items.map(item => ({
+                productName: item.productName,
+                quantity: item.quantity,
+            })),
+            totalAmount: order.totalAmount,
+            shipmentStatus: 'ready_to_ship',
+            createdAt: new Date(),
+            customerId: order.customerId
+        };
+
         try {
-            setLoading(true);
-            console.log('Loading data for vendorId:', vendorId);
-            
-            const transactionsData = await getDocuments('transactions');
-            const usersData = await getDocuments('users');
-            const productsData = await getDocuments('products');
-            
-            console.log('Raw transactions data:', transactionsData);
-            
-            const vendorOrders = await Promise.all(transactionsData
-                .filter((transaction: any) => {
-                    console.log('Comparing:', transaction.storeName, 'with', vendorId);
-                    return transaction.storeName === vendorId;
-                })
-                .map(async (transaction: any) => {
-                    // Lấy thông tin người dùng
-                    const userData = usersData.find((user: any) => user.id === transaction.userId);
-                    console.log('User data:', userData);
-                    
-                    // Lấy thông tin chi tiết cho từng sản phẩm trong đơn hàng
-                    const itemsWithDetails = await Promise.all((transaction.items || []).map(async (item: any) => {
-                        const productData = productsData.find((product: any) => product.id === item.productId);
-                        return {
-                            productId: item.productId,
-                            productName: item.productName,
-                            quantity: item.quantity,
-                            price: item.price,
-                            productDetails: productData ? {
-                                name: productData.name,
-                                description: productData.description,
-                                price: productData.price
-                            } : null
-                        } as OrderItem;
-                    }));
-
-                    return {
-                        id: transaction.id,
-                        customerId: transaction.userId,
-                        customerName: userData?.fullName || 'Không xác định',
-                        customerEmail: userData?.username|| 'Không xác định',
-                        customerPhone: userData?.phone || transaction.phoneNumber || 'Không xác định',
-                        items: itemsWithDetails,
-                        totalAmount: transaction.totalAmount,
-                        status: transaction.status,
-                        createdAt: transaction.createdAt?.toDate() || new Date(),
-                        updatedAt: transaction.updatedAt?.toDate() || new Date(),
-                        shippingAddress: userData?.address || 'Không xác định',
-                        phoneNumber: transaction.phoneNumber
-                    } as Order;
-                }));
-
-            console.log('Filtered vendor orders with details:', vendorOrders);
-
-            setOrders(vendorOrders);
-            setFilteredOrders(vendorOrders.filter(order => order.status === 'pending'));
-        } catch (error) {
-            console.error('Lỗi khi tải dữ liệu:', error);
-        } finally {
-            setLoading(false);
+            // 3. Try to add the formatted shipper data to the 'ship' collection
+            await addDocument('ship', shipperOrderData);
+        } catch (error: any) {
+            console.error('Lỗi khi thêm vào collection ship:', error);
+            // Nếu collection chưa tồn tại, tạo collection mới
+            if (error.message && error.message.includes('collection does not exist')) {
+                console.log('Tạo collection ship mới...');
+                // Thêm một document rỗng để tạo collection
+                await addDocument('ship', {
+                    _createdAt: new Date(),
+                    _updatedAt: new Date()
+                });
+                // Thử lại việc thêm dữ liệu
+                await addDocument('ship', shipperOrderData);
+            } else {
+                throw error; // Nếu lỗi khác, ném ra ngoài để xử lý
+            }
         }
-    };
-
-    const filterOrders = (query: string, tab: TabType) => {
-        let filtered = [...orders];
-
-        if (query.trim()) {
-            filtered = filtered.filter(order => 
-                order.customerName.toLowerCase().includes(query.toLowerCase()) ||
-                order.id.toLowerCase().includes(query.toLowerCase())
-            );
-        }
-
-        filtered = filtered.filter(order => {
-            if (tab === 'pending') return order.status === 'pending';
-            if (tab === 'approved') return order.status === 'completed';
-            if (tab === 'cancelled') return order.status === 'cancelled';
-            return false;
-        });
-
-        setFilteredOrders(filtered);
-    };
+    }
 
     const handleApproveOrder = async (order: Order) => {
         try {
+            // 1. Update the transaction status
             await updateDocument('transactions', order.id, {
                 status: 'completed',
                 updatedAt: new Date()
@@ -160,10 +135,10 @@ export default function Orders() {
 
             const vendorProducts = await getDocuments('vendor_products');
             for (const item of order.items) {
-                const vendorProduct = vendorProducts.find((vp: any) => 
+                const vendorProduct = vendorProducts.find((vp: any) =>
                     vp.products === item.productName && vp.id === order.customerId
                 );
-                
+
                 if (vendorProduct) {
                     const newStock = vendorProduct.stock - item.quantity;
                     await updateDocument('vendor_products', vendorProduct.id, {
@@ -172,13 +147,13 @@ export default function Orders() {
                 }
             }
 
-            setOrders(prevOrders => 
-                prevOrders.map(o => 
+            setOrders(prevOrders =>
+                prevOrders.map(o =>
                     o.id === order.id ? { ...o, status: 'completed' } : o
                 )
             );
 
-            Alert.alert('Thành công', 'Đơn hàng đã được phê duyệt');
+            Alert.alert('Thành công', 'Đơn hàng đã được phê duyệt và chuyển cho shipper');
         } catch (error) {
             console.error('Lỗi khi phê duyệt đơn hàng:', error);
             Alert.alert('Lỗi', 'Không thể phê duyệt đơn hàng');
@@ -192,8 +167,8 @@ export default function Orders() {
                 updatedAt: new Date()
             });
 
-            setOrders(prevOrders => 
-                prevOrders.map(o => 
+            setOrders(prevOrders =>
+                prevOrders.map(o =>
                     o.id === order.id ? { ...o, status: 'cancelled' } : o
                 )
             );
@@ -229,7 +204,7 @@ export default function Orders() {
                     {item.status.toUpperCase()}
                 </Text>
             </View>
-            
+
             <View style={styles.customerSection}>
                 <View style={styles.customerInfo}>
                     <Ionicons name="person-circle-outline" size={20} color="#007AFF" style={styles.infoIcon} />
@@ -278,7 +253,10 @@ export default function Orders() {
                 <View style={styles.actionButtons}>
                     <TouchableOpacity
                         style={[styles.actionButton, styles.approveButton]}
-                        onPress={() => handleApproveOrder(item)}
+                        onPress={() => {
+                            handleApproveOrder(item);
+                            handleShipperOrder(item);
+                        }}
                     >
                         <MaterialIcons name="check-circle" size={20} color="#fff" style={styles.actionIcon} />
                         <Text style={styles.actionButtonText}>Duyệt</Text>
@@ -295,6 +273,114 @@ export default function Orders() {
         </View>
     );
 
+    const loadData = async (vendorId: string) => {
+        try {
+            setLoading(true);
+            console.log('Loading data for vendorId:', vendorId);
+
+            const transactionsData = await getDocuments('transactions');
+            const usersData = await getDocuments('users');
+            const productsData = await getDocuments('products');
+
+            console.log('Raw transactions data:', transactionsData);
+
+            const vendorOrders = await Promise.all(transactionsData
+                .filter((transaction: any) => {
+                    console.log('Comparing:', transaction.storeName, 'with', vendorId);
+                    return transaction.storeName === vendorId;
+                })
+                .map(async (transaction: any) => {
+                    // Lấy thông tin người dùng
+                    const userData = usersData.find((user: any) => user.id === transaction.userId);
+                    console.log('User data:', userData);
+
+                    // Lấy thông tin chi tiết cho từng sản phẩm trong đơn hàng
+                    const itemsWithDetails = await Promise.all((transaction.items || []).map(async (item: any) => {
+                        const productData = productsData.find((product: any) => product.id === item.productId);
+                        return {
+                            productId: item.productId,
+                            productName: item.productName,
+                            quantity: item.quantity,
+                            price: item.price,
+                            productDetails: productData ? {
+                                name: productData.name,
+                                description: productData.description,
+                                price: productData.price
+                            } : null
+                        } as OrderItem;
+                    }));
+
+                    const order = {
+                        id: transaction.id,
+                        customerId: transaction.userId,
+                        customerName: userData?.fullName || 'Không xác định',
+                        customerEmail: userData?.username || 'Không xác định',
+                        customerPhone: userData?.phone || transaction.phoneNumber || 'Không xác định',
+                        items: itemsWithDetails,
+                        totalAmount: transaction.totalAmount,
+                        status: transaction.status,
+                        createdAt: transaction.createdAt?.toDate() || new Date(),
+                        updatedAt: transaction.updatedAt?.toDate() || new Date(),
+                        shippingAddress: userData?.address || 'Không xác định',
+                        phoneNumber: transaction.phoneNumber
+                    } as Order;
+
+                    // Kiểm tra và tự động duyệt đơn hàng nếu đáp ứng điều kiện
+                    if (order.status === 'pending' && shouldAutoApprove(order)) {
+                        const fiveMinutesInMs = 5 * 60 * 1000;
+                        const currentTime = Date.now();
+                        const orderCreationTime = order.createdAt.getTime(); // Lấy timestamp
+
+                        // Kiểm tra xem thời gian hiện tại có lớn hơn thời gian tạo + 5 phút không
+                        if (currentTime >= (orderCreationTime + fiveMinutesInMs)) {
+                            console.log(`Đơn hàng ${order.id} đủ điều kiện và đã qua 5 phút (${order.createdAt.toLocaleString()}), tự động duyệt...`);
+                            try {
+                                await handleApproveOrder(order);
+                                order.status = 'completed';
+                                await handleShipperOrder(order);
+                                console.log(`Đơn hàng ${order.id} đã được tự động duyệt và gửi cho shipper thành công.`);
+                            } catch (autoApproveError) {
+                                 console.error(`Lỗi khi tự động duyệt đơn hàng ${order.id}:`, autoApproveError);
+                            }
+                        } else {
+                              console.log(`Đơn hàng ${order.id} đủ điều kiện nhưng chưa đủ 5 phút (tạo lúc ${order.createdAt.toLocaleString()}), bỏ qua tự động duyệt.`);
+                        }
+                    }
+
+                    return order;
+                }));
+
+            console.log('Filtered vendor orders with details:', vendorOrders);
+
+            setOrders(vendorOrders);
+            setFilteredOrders(vendorOrders.filter(order => order.status === 'pending'));
+        } catch (error) {
+            console.error('Lỗi khi tải dữ liệu:', error);
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const filterOrders = (query: string, tab: TabType) => {
+        let filtered = [...orders];
+
+        if (query.trim()) {
+            filtered = filtered.filter(order =>
+                order.customerName.toLowerCase().includes(query.toLowerCase()) ||
+                order.id.toLowerCase().includes(query.toLowerCase())
+            );
+        }
+
+        filtered = filtered.filter(order => {
+            if (tab === 'pending') return order.status === 'pending';
+            if (tab === 'approved') return order.status === 'completed';
+            if (tab === 'cancelled') return order.status === 'cancelled';
+            return false;
+        });
+
+        setFilteredOrders(filtered);
+    };
+
     return (
         <SafeAreaView style={styles.container}>
             <View style={styles.header}>
@@ -307,10 +393,10 @@ export default function Orders() {
                     style={[styles.tab, activeTab === 'pending' && styles.activeTab]}
                     onPress={() => setActiveTab('pending')}
                 >
-                    <MaterialIcons 
-                        name="hourglass-empty" 
-                        size={20} 
-                        color={activeTab === 'pending' ? "#fff" : "#666"} 
+                    <MaterialIcons
+                        name="hourglass-empty"
+                        size={20}
+                        color={activeTab === 'pending' ? "#fff" : "#666"}
                     />
                     <Text style={[styles.tabText, activeTab === 'pending' && styles.activeTabText]}>
                         Chờ duyệt
@@ -320,10 +406,10 @@ export default function Orders() {
                     style={[styles.tab, activeTab === 'approved' && styles.activeTab]}
                     onPress={() => setActiveTab('approved')}
                 >
-                    <MaterialIcons 
-                        name="check-circle" 
-                        size={20} 
-                        color={activeTab === 'approved' ? "#fff" : "#666"} 
+                    <MaterialIcons
+                        name="check-circle"
+                        size={20}
+                        color={activeTab === 'approved' ? "#fff" : "#666"}
                     />
                     <Text style={[styles.tabText, activeTab === 'approved' && styles.activeTabText]}>
                         Đã duyệt
@@ -333,10 +419,10 @@ export default function Orders() {
                     style={[styles.tab, activeTab === 'cancelled' && styles.activeTab]}
                     onPress={() => setActiveTab('cancelled')}
                 >
-                    <MaterialIcons 
-                        name="cancel" 
-                        size={20} 
-                        color={activeTab === 'cancelled' ? "#fff" : "#666"} 
+                    <MaterialIcons
+                        name="cancel"
+                        size={20}
+                        color={activeTab === 'cancelled' ? "#fff" : "#666"}
                     />
                     <Text style={[styles.tabText, activeTab === 'cancelled' && styles.activeTabText]}>
                         Đã hủy
@@ -364,11 +450,11 @@ export default function Orders() {
                 <View style={styles.emptyContainer}>
                     <MaterialIcons name="receipt" size={64} color="#ccc" />
                     <Text style={styles.emptyText}>
-                        {activeTab === 'pending' 
+                        {activeTab === 'pending'
                             ? 'Không có đơn hàng chờ duyệt'
                             : activeTab === 'approved'
-                            ? 'Không có đơn hàng đã duyệt'
-                            : 'Không có đơn hàng đã hủy'
+                                ? 'Không có đơn hàng đã duyệt'
+                                : 'Không có đơn hàng đã hủy'
                         }
                     </Text>
                 </View>
